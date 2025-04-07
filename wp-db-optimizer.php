@@ -64,6 +64,9 @@ class WP_DB_Optimizer
 
         // Register settings
         add_action('admin_init', array($this, 'register_settings'));
+
+        // Tambahkan admin notices
+        add_action('admin_notices', array($this, 'admin_notices'));
     }
 
     /**
@@ -89,6 +92,24 @@ class WP_DB_Optimizer
     }
 
     /**
+     * Admin notices untuk tampilkan pesan
+     */
+    public function admin_notices()
+    {
+        if (isset($_GET['page']) && $_GET['page'] == 'wp-db-optimizer') {
+            if (isset($_GET['optimized']) && $_GET['optimized'] == 1) {
+                echo '<div class="notice notice-success is-dismissible"><p>Optimasi database berhasil dilakukan!</p></div>';
+            }
+
+            if (isset($_GET['email_sent']) && $_GET['email_sent'] == 1) {
+                echo '<div class="notice notice-success is-dismissible"><p>Email notifikasi berhasil dikirim!</p></div>';
+            } elseif (isset($_GET['email_sent']) && $_GET['email_sent'] == 0) {
+                echo '<div class="notice notice-error is-dismissible"><p>Gagal mengirim email notifikasi. Periksa log untuk detailnya.</p></div>';
+            }
+        }
+    }
+
+    /**
      * Render halaman admin
      */
     public function render_admin_page()
@@ -99,11 +120,6 @@ class WP_DB_Optimizer
 
         // Dapatkan tab aktif
         $active_tab = isset($_GET['tab']) ? sanitize_text_field($_GET['tab']) : 'status';
-
-        // Tampilkan pesan sukses jika ada
-        if (isset($_GET['optimized']) && $_GET['optimized'] == 1) {
-            echo '<div class="notice notice-success is-dismissible"><p>Optimasi database berhasil dilakukan!</p></div>';
-        }
 
         // Dapatkan info database
         global $wpdb;
@@ -119,6 +135,7 @@ class WP_DB_Optimizer
             <h2 class="nav-tab-wrapper">
                 <a href="?page=wp-db-optimizer&tab=status" class="nav-tab <?php echo $active_tab == 'status' ? 'nav-tab-active' : ''; ?>">Status</a>
                 <a href="?page=wp-db-optimizer&tab=settings" class="nav-tab <?php echo $active_tab == 'settings' ? 'nav-tab-active' : ''; ?>">Pengaturan</a>
+                <a href="?page=wp-db-optimizer&tab=logs" class="nav-tab <?php echo $active_tab == 'logs' ? 'nav-tab-active' : ''; ?>">Log</a>
             </h2>
 
             <?php if ($active_tab == 'status') : ?>
@@ -196,6 +213,119 @@ class WP_DB_Optimizer
 
                     <?php submit_button('Simpan Pengaturan'); ?>
                 </form>
+
+                <div class="card" style="margin-top: 20px;">
+                    <h2>Tes Pengiriman Email</h2>
+                    <p>Gunakan fitur ini untuk menguji apakah email berfungsi dengan benar.</p>
+                    <form method="post" action="">
+                        <?php wp_nonce_field('test_email_nonce', 'test_email_nonce'); ?>
+                        <input type="hidden" name="test_email" value="1">
+                        <input type="submit" class="button button-secondary" value="Kirim Email Tes">
+                    </form>
+
+                    <?php
+                    // Handle tes email
+                    if (isset($_POST['test_email']) && isset($_POST['test_email_nonce']) && wp_verify_nonce($_POST['test_email_nonce'], 'test_email_nonce')) {
+                        $to = isset($this->options['notification_email']) ? $this->options['notification_email'] : get_option('admin_email');
+                        $subject = 'Tes Email dari WP Database Optimizer';
+                        $message = "Ini adalah email tes dari plugin WP Database Optimizer.\n\n";
+                        $message .= "Jika Anda menerima email ini, berarti pengaturan email Anda berfungsi dengan baik.\n\n";
+                        $message .= "Situs: " . get_bloginfo('name') . "\n";
+                        $message .= "URL: " . site_url() . "\n";
+                        $message .= "Waktu: " . date('Y-m-d H:i:s') . "\n";
+
+                        // Tambahkan log untuk debugging
+                        $this->log("Mencoba mengirim email tes ke $to");
+
+                        // Coba dengan wp_mail() terlebih dahulu
+                        $result = wp_mail($to, $subject, $message);
+
+                        // Log hasil
+                        if ($result) {
+                            $this->log("Email tes berhasil dikirim menggunakan wp_mail()");
+                            echo '<div class="notice notice-success is-dismissible"><p>Email tes berhasil dikirim ke ' . esc_html($to) . '</p></div>';
+                        } else {
+                            $this->log("wp_mail() gagal, mencoba dengan mail() PHP native");
+
+                            // Coba dengan mail() PHP native sebagai fallback
+                            $headers = 'From: ' . get_bloginfo('name') . ' <' . get_option('admin_email') . '>' . "\r\n";
+                            $native_result = mail($to, $subject, $message, $headers);
+
+                            if ($native_result) {
+                                $this->log("Email tes berhasil dikirim menggunakan mail() PHP native");
+                                echo '<div class="notice notice-success is-dismissible"><p>Email tes berhasil dikirim ke ' . esc_html($to) . ' menggunakan metode alternatif</p></div>';
+                            } else {
+                                $this->log("Semua metode pengiriman email gagal", 'error');
+                                echo '<div class="notice notice-error is-dismissible">';
+                                echo '<p>Gagal mengirim email tes. Silakan periksa pengaturan email server Anda.</p>';
+                                echo '<p>Hal yang bisa Anda coba:</p>';
+                                echo '<ul style="list-style-type:disc;margin-left:20px;">';
+                                echo '<li>Instal plugin SMTP seperti WP Mail SMTP</li>';
+                                echo '<li>Periksa apakah fungsi mail() PHP diaktifkan di server</li>';
+                                echo '<li>Pastikan email tidak diblokir oleh firewall/keamanan server</li>';
+                                echo '</ul>';
+                                echo '</div>';
+                            }
+                        }
+                    }
+                    ?>
+                </div>
+            <?php elseif ($active_tab == 'logs') : ?>
+                <div class="card">
+                    <h2>Log Aktivitas</h2>
+                    <?php
+                    global $wpdb;
+                    $table_name = $wpdb->prefix . 'db_optimizer_logs';
+                    $logs = $wpdb->get_results("SELECT * FROM $table_name ORDER BY log_time DESC LIMIT 100");
+
+                    if ($logs) {
+                        echo '<table class="widefat striped">';
+                        echo '<thead><tr><th>Waktu</th><th>Tipe</th><th>Pesan</th></tr></thead>';
+                        echo '<tbody>';
+
+                        foreach ($logs as $log) {
+                            $type_class = 'log-type-' . esc_attr($log->log_type);
+                            echo '<tr>';
+                            echo '<td>' . esc_html($log->log_time) . '</td>';
+                            echo '<td><span class="log-type ' . $type_class . '">' . esc_html($log->log_type) . '</span></td>';
+                            echo '<td>' . esc_html($log->log_message) . '</td>';
+                            echo '</tr>';
+                        }
+
+                        echo '</tbody></table>';
+
+                        // Tambahkan CSS untuk log
+                    ?>
+                        <style>
+                            .log-type {
+                                display: inline-block;
+                                padding: 2px 8px;
+                                border-radius: 3px;
+                                font-size: 12px;
+                                text-transform: uppercase;
+                            }
+
+                            .log-type-info {
+                                background-color: #e7f0f5;
+                                color: #0073aa;
+                            }
+
+                            .log-type-error {
+                                background-color: #f8d7da;
+                                color: #d63638;
+                            }
+
+                            .log-type-warning {
+                                background-color: #fff8e5;
+                                color: #b45900;
+                            }
+                        </style>
+                    <?php
+                    } else {
+                        echo '<p>Belum ada log aktivitas.</p>';
+                    }
+                    ?>
+                </div>
             <?php endif; ?>
         </div>
 <?php
@@ -248,10 +378,10 @@ class WP_DB_Optimizer
         }
 
         // Jalankan optimasi
-        $this->run_optimization(true);
+        $email_sent = $this->run_optimization(true);
 
-        // Redirect kembali
-        wp_redirect(admin_url('tools.php?page=wp-db-optimizer&optimized=1'));
+        // Redirect kembali dengan info email
+        wp_redirect(admin_url('tools.php?page=wp-db-optimizer&optimized=1&email_sent=' . ($email_sent ? '1' : '0')));
         exit;
     }
 
@@ -351,19 +481,23 @@ class WP_DB_Optimizer
         $this->log("Optimasi selesai dalam {$execution_time} detik. {$results['optimized_tables']} tabel dioptimasi, {$results['removed_items']} item dihapus.");
 
         // Kirim email notifikasi jika diaktifkan
+        $email_sent = false;
         if (isset($this->options['send_email']) && $this->options['send_email']) {
-            $this->send_notification_email($results, $execution_time);
+            $email_sent = $this->send_notification_email($results, $execution_time);
         }
 
-        return $results;
+        return $email_sent;
     }
 
     /**
-     * Kirim email notifikasi
+     * Kirim email notifikasi dengan debugging dan fallback
      */
     private function send_notification_email($results, $execution_time)
     {
-        $to = isset($this->options['notification_email']) ? $this->options['notification_email'] : get_option('admin_email');
+        $to = isset($this->options['notification_email']) && !empty($this->options['notification_email'])
+            ? $this->options['notification_email']
+            : get_option('admin_email');
+
         $subject = 'Laporan Optimasi Database WordPress - ' . get_bloginfo('name');
 
         $message = "=== LAPORAN OPTIMASI DATABASE ===\n\n";
@@ -382,13 +516,29 @@ class WP_DB_Optimizer
 
         $message .= "Email ini dikirim secara otomatis oleh plugin WP Database Optimizer.\n";
 
-        // Kirim email
+        // Log upaya pengiriman
+        $this->log("Mencoba mengirim email notifikasi ke {$to}");
+
+        // Coba dengan wp_mail() terlebih dahulu
         $sent = wp_mail($to, $subject, $message);
 
         if ($sent) {
             $this->log("Email notifikasi berhasil dikirim ke {$to}");
+            return true;
         } else {
-            $this->log("Gagal mengirim email notifikasi ke {$to}", 'error');
+            $this->log("wp_mail() gagal, mencoba dengan mail() PHP native", 'warning');
+
+            // Fallback ke mail() PHP native
+            $headers = 'From: ' . get_bloginfo('name') . ' <' . get_option('admin_email') . '>' . "\r\n";
+            $mail_sent = @mail($to, $subject, $message, $headers);
+
+            if ($mail_sent) {
+                $this->log("Email notifikasi berhasil dikirim via mail() PHP native ke {$to}");
+                return true;
+            } else {
+                $this->log("Gagal mengirim email notifikasi, kedua metode pengiriman gagal", 'error');
+                return false;
+            }
         }
     }
 
@@ -412,6 +562,15 @@ class WP_DB_Optimizer
 
         require_once ABSPATH . 'wp-admin/includes/upgrade.php';
         dbDelta($sql);
+
+        // Log inisialisasi tabel
+        if ($wpdb->get_var("SHOW TABLES LIKE '$table_name'") == $table_name) {
+            $data = array(
+                'log_message' => 'Tabel log berhasil dibuat atau sudah ada',
+                'log_type' => 'info'
+            );
+            $wpdb->insert($table_name, $data);
+        }
     }
 
     /**
@@ -423,14 +582,24 @@ class WP_DB_Optimizer
 
         $table_name = $wpdb->prefix . 'db_optimizer_logs';
 
+        // Pastikan tabel ada
+        if ($wpdb->get_var("SHOW TABLES LIKE '$table_name'") != $table_name) {
+            $this->create_log_table();
+        }
+
         $data = array(
             'log_message' => $message,
             'log_type' => $type
         );
 
-        $wpdb->insert($table_name, $data);
+        $result = $wpdb->insert($table_name, $data);
 
-        return $wpdb->insert_id;
+        // Juga tulis ke debug.log untuk debugging
+        if (defined('WP_DEBUG') && WP_DEBUG) {
+            error_log('[WP DB Optimizer] ' . $type . ': ' . $message);
+        }
+
+        return $result ? $wpdb->insert_id : false;
     }
 
     /**
